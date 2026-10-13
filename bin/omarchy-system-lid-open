@@ -1,0 +1,11 @@
+#!/bin/bash
+
+# omarchy:summary=Wake displays when the laptop lid opens
+# omarchy:group=system
+# omarchy:hidden=true
+
+# Route through the lock even while unlocked, so an in-flight blank cannot
+# overtake this wake. A clamshell-only sync does not enable DPMS without a flag.
+if [[ $(omarchy-shell lock wake 2>/dev/null) != "ok" ]]; then
+  omarchy-system-wake
+fi

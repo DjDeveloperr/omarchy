@@ -46,6 +46,7 @@ Item {
   property string lastEvent: "init"
   property string lastEventAt: ""
   property bool displaysBlank: false
+  property string requestedDisplayPower: ""
   // displaysBlank tracks what the lock asked for; Hyprland reports what each
   // panel actually did. While a video is on show the two are reconciled, so a
   // blank that failed keeps playing and a panel woken behind the lock's back
@@ -247,10 +248,11 @@ Item {
   }
 
   function runWake() {
+    idleBlankTimer.stop()
     root.displaysBlank = false
     root.monitorDpmsKnown = false
-    if (!wakeProcess.running) wakeProcess.running = true
-    if (lockRequested) armBlankTimer()
+    root.requestedDisplayPower = "wake"
+    root.reconcileDisplayPower()
     nudgeFingerprint()
   }
 
@@ -305,7 +307,32 @@ Item {
   function runBlank() {
     root.displaysBlank = true
     root.monitorDpmsKnown = false
-    if (!blankProcess.running) blankProcess.running = true
+    root.requestedDisplayPower = "blank"
+    root.reconcileDisplayPower()
+  }
+
+  // A blank command already in flight must finish before the subsequent wake.
+  // Starting independent processes lets the stale blank overtake the wake.
+  function reconcileDisplayPower() {
+    if (displayPowerProcess.running || !root.requestedDisplayPower) return
+    displayPowerProcess.operation = root.requestedDisplayPower
+    displayPowerProcess.command = ["bash", "-c", displayPowerProcess.operation === "wake"
+      ? "omarchy-system-wake"
+      : "omarchy-brightness-keyboard off; omarchy-brightness-display off"]
+    root.logEvent("display-power-start: " + displayPowerProcess.operation)
+    displayPowerProcess.running = true
+  }
+
+  function displayPowerFinished(operation, exitCode) {
+    root.logEvent("display-power-finished: " + operation + " exit=" + exitCode)
+    if (operation !== root.requestedDisplayPower) {
+      root.reconcileDisplayPower()
+      return
+    }
+    root.requestedDisplayPower = ""
+    // Give the user the full interval after wake has completed, rather than
+    // counting the display wake/clamshell command's execution time as idle.
+    if (operation === "wake" && root.lockRequested) root.armBlankTimer()
   }
 
   function screenBlank(screenName) {
@@ -705,13 +732,11 @@ Item {
   }
 
   Process {
-    id: wakeProcess
-    command: ["bash", "-c", "omarchy-system-wake"]
-  }
-
-  Process {
-    id: blankProcess
-    command: ["bash", "-c", "omarchy-brightness-keyboard off; omarchy-brightness-display off"]
+    id: displayPowerProcess
+    property string operation: ""
+    onExited: function(exitCode) {
+      root.displayPowerFinished(operation, exitCode)
+    }
   }
 
   // Quickshell exposes no DPMS signal, so the panel state is polled while a
@@ -852,6 +877,11 @@ Item {
       return root.currentlyLocked() ? "true" : "false"
     }
 
+    function wake(): string {
+      root.runWake()
+      return "ok"
+    }
+
     function status(): string {
       return JSON.stringify({
         locked: root.currentlyLocked(),
@@ -864,6 +894,9 @@ Item {
         fingerprint: root.fingerprintConfigured,
         fingerprintUnavailable: root.fingerprintUnavailable,
         authenticating: root.authenticating,
+        displaysBlank: root.displaysBlank,
+        requestedDisplayPower: root.requestedDisplayPower,
+        displayPowerRunning: displayPowerProcess.running,
         lastEvent: root.lastEvent,
         lastEventAt: root.lastEventAt
       })
