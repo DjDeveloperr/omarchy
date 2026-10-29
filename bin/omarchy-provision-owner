@@ -158,10 +158,11 @@ log_step() {
 # ── Setup progress screen ────────────────────────────────────────────────────
 #
 # A port of the ISO install dashboard's renderer, so first-boot account setup
-# looks like a continuation of the install: same logo header, same 34-cell
-# bar, same rotating tips. Position = max(floor, work) in
-# per-mille, monotonic; the floor is asymptotic per phase band and the work
-# signal counts finalize-user's run_logged scripts in the log.
+# looks like a continuation of the install: the same Omarchy icon traced in
+# green as setup advances, the same percentage under it, the same rotating
+# tips. Position = max(floor, work) in per-mille, monotonic; the floor is
+# asymptotic per phase band and the work signal counts finalize-user's
+# run_logged scripts in the log.
 
 CSI=$'\033['
 RESET="${CSI}0m"
@@ -172,15 +173,11 @@ CLEAR="${CSI}2J${CSI}H"
 CLEAR_LINE="${CSI}2K"
 CLEAR_TO_END="${CSI}J"
 GREEN="${CSI}32m"
-WHITE="${CSI}37m"
-DARK="${CSI}90m"
 
 STATE_FILE=/run/omarchy-provision-owner.state
 FINALIZE_WARNING_FLAG=/run/omarchy-provision-owner.finalize-warning
-# Rows the setup screen occupies: logo, blank, title, blank, bar, blank, tip.
-SETUP_HEIGHT=$((LOGO_HEIGHT + 6))
 SETUP_TOP_ROW=1
-DYNAMIC_ROW=$((LOGO_HEIGHT + 3))
+SETUP_TEXT_WIDTH=$LOGO_WIDTH
 LAST_SETUP_SIZE=""
 
 tips=(
@@ -212,6 +209,61 @@ term_cols() {
 }
 
 term_size() { stty size 2>/dev/null </dev/tty || printf '24 80\n'; }
+
+# Read the actual character dimensions instead of assuming an 8 x 16 font:
+# scale_console_font may have picked a 12 x 22 or 16 x 32 one. Linux VTs expose
+# the font through KDFONTOP; desktop terminals may expose pixels in their window
+# size or answer the standard cell-size query.
+term_cell_size() {
+  python3 - /dev/tty <<'PY'
+import fcntl
+import os
+import re
+import select
+import struct
+import sys
+import termios
+import time
+import tty
+
+with open(sys.argv[1], "r+b", buffering=0) as terminal:
+    fd = terminal.fileno()
+    rows, cols, width, height = struct.unpack(
+        "HHHH", fcntl.ioctl(fd, termios.TIOCGWINSZ, bytes(8)))
+    if rows and cols and width and height:
+        print(round(width / cols), round(height / rows))
+        sys.exit()
+    try:
+        font = bytearray(struct.pack("@5IP", 1, 0, 0, 0, 0, 0))
+        fcntl.ioctl(fd, 0x4B72, font)  # KDFONTOP / KD_FONT_OP_GET, no glyph data
+        _, _, width, height, _ = struct.unpack_from("@5I", font)
+        if width and height:
+            print(width, height)
+            sys.exit()
+    except OSError:
+        pass
+
+    settings = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd, termios.TCSANOW)
+        os.write(fd, b"\x1b[16t")
+        response = b""
+        deadline = time.monotonic() + 0.15
+        while select.select([fd], [], [], max(0, deadline - time.monotonic()))[0]:
+            response += os.read(fd, 64)
+            match = re.search(rb"\x1b\[6;(\d+);(\d+)t", response)
+            if match:
+                height, width = map(int, match.groups())
+                if width and height:
+                    print(width, height)
+                    sys.exit()
+            if time.monotonic() >= deadline:
+                break
+    finally:
+        termios.tcsetattr(fd, termios.TCSANOW, settings)
+    print(8, 16)  # Conventional console font when dimensions aren't available.
+PY
+}
 
 # A fingerprint of the console geometry: the VT size plus the framebuffer's
 # identity and pixel size. On a fresh first boot the VT can come up in a
@@ -248,12 +300,6 @@ wait_console_stable() {
   return 1
 }
 
-repeat() {
-  local char="$1" count="$2" out="" i
-  for ((i = 0; i < count; i++)); do out+="$char"; done
-  printf '%s' "$out"
-}
-
 left_padding() {
   local width="${1:-$LOGO_WIDTH}" cols pad
   cols=$(term_cols)
@@ -270,13 +316,6 @@ visible_len() {
 
 blank_line() { printf '\r%s\n' "$CLEAR_LINE"; }
 
-line_at() {
-  local width="${1:-$LOGO_WIDTH}" indent="${2:-0}"
-  shift 2
-  printf '\r%s%s%*s' "$CLEAR_LINE" "$(left_padding "$width")" "$indent" ''
-  printf '%b' "$*"
-}
-
 center() {
   local text="$1" width="${2:-$LOGO_WIDTH}" len inner_pad
   len="$(visible_len "$text")"
@@ -285,24 +324,179 @@ center() {
   printf '\r%s%s%*s%b%s\n' "$CLEAR_LINE" "$(left_padding "$width")" "$inner_pad" '' "$text" "$RESET"
 }
 
-render_logo() {
-  local pad line
-  pad="$(left_padding "$LOGO_WIDTH")"
-  while IFS= read -r line; do
-    printf '\r%s%s%b%s%b\n' "$CLEAR_LINE" "$pad" "$GREEN" "$line" "$RESET"
-  done <"$LOGO_PATH"
+truncate_for_width() {
+  local text="$1" width="$2"
+  if (( ${#text} > width )); then
+    printf '%s…' "${text:0:$((width - 1))}"
+  else
+    printf '%s' "$text"
+  fi
 }
 
-progress_bar() {
-  local pm="$1" width="${2:-34}" filled empty
-  (( pm < 0 )) && pm=0
-  (( pm > 1000 )) && pm=1000
-  filled=$((pm * width / 1000))
-  empty=$((width - filled))
-  printf '%s%s%s%s%s' "$WHITE" "$(repeat █ "$filled")" "$DARK" "$(repeat ░ "$empty")" "$RESET"
+# The icon uses half-block glyphs, scaled to the terminal's actual cell aspect
+# ratio so its square silhouette stays square. No graphics protocol is needed.
+# Coordinates follow the 15 x 15 grid of Omarchy's icon.svg. Each segment
+# paints the full stroke width, starting at the bottom middle of the outer ring.
+# The ISO adds ▀ and ▄ to its Terminus console font; the three kbd fonts
+# scale_console_font picks from already map them and █, as the logo needs too.
+ICON_WIDTH=30
+ICON_HEIGHT=15
+CELL_WIDTH=8
+CELL_HEIGHT=16
+ICON_LEFT=1
+ICON_STEPS=0
+ICON_DRAWN=0
+DISPLAY_PM=0
+ICON_FRAME=""
+declare -a ICON_ORDER=() ICON_TRACE=() ICON_FILL=()
+
+icon_segment() {
+  local scale="$1" x1="$2" y1="$3" x2="$4" y2="$5"
+  local x y from to
+  if (( y1 == y2 )); then
+    from=$(( (x1 * ICON_WIDTH + 14) / 15 ))
+    to=$(( ((x2 + 1) * ICON_WIDTH + 14) / 15 ))
+    if (( x2 < x1 )); then
+      from=$(( ((x1 + 1) * ICON_WIDTH + 14) / 15 - 1 ))
+      to=$(( (x2 * ICON_WIDTH + 14) / 15 - 1 ))
+    fi
+    for ((x=from; x!=to; x+=(x2 >= x1 ? 1 : -1))); do
+      for ((y=y1 * scale; y<(y1 + 1) * scale; y++)); do
+        icon_pixel "$((y * ICON_WIDTH + x))"
+      done
+    done
+  else
+    from=$(( y1 * scale ))
+    to=$(( (y2 + 1) * scale ))
+    if (( y2 < y1 )); then
+      from=$(( (y1 + 1) * scale - 1 ))
+      to=$(( y2 * scale - 1 ))
+    fi
+    for ((y=from; y!=to; y+=(y2 >= y1 ? 1 : -1))); do
+      for ((x=(x1 * ICON_WIDTH + 14) / 15; x<((x1 + 1) * ICON_WIDTH + 14) / 15; x++)); do
+        icon_pixel "$((y * ICON_WIDTH + x))"
+      done
+    done
+  fi
 }
 
-# Monotonic clock so an NTP step during setup cannot jump the bar.
+icon_pixel() {
+  local pixel="$1"
+  if [[ ! -v ICON_TRACE[pixel] ]]; then
+    ICON_ORDER+=("$pixel")
+    ICON_TRACE[pixel]=${#ICON_ORDER[@]}
+  fi
+}
+
+build_icon() {
+  local scale="$1" x y row
+  local -a mask=(
+    111111111111111
+    100000010000001
+    101111110001101
+    101000000000101
+    101000000000101
+    101000000000101
+    101000000000101
+    111000000000101
+    101000000000101
+    101000000000101
+    101000000000101
+    101000000000101
+    101111111111101
+    100000010000001
+    111111110111111
+  )
+  # Whole cells per grid column, so every stroke is as wide as the next. On a
+  # 2:1 font that is exactly square, as on the ISO's Terminus; on sun12x22 it
+  # is 9% wider than tall, where proportional columns would draw the right edge
+  # and the bridges at half width.
+  ICON_WIDTH=$((15 * ((scale * CELL_HEIGHT + CELL_WIDTH) / (2 * CELL_WIDTH))))
+  ICON_HEIGHT=$(((15 * scale + 1) / 2))
+  ICON_ORDER=() ICON_TRACE=() ICON_FILL=()
+  ICON_DRAWN=0
+  # Start at the bottom middle, follow the outer left edge to the top cross,
+  # then descend into the inner shape. Fill its two bridges as we reach them.
+  icon_segment "$scale" 7 14 0 14
+  icon_segment "$scale" 0 14 0 0
+  icon_segment "$scale" 0 0 7 0
+  icon_segment "$scale" 7 0 7 2
+  icon_segment "$scale" 7 2 2 2
+  icon_segment "$scale" 2 2 2 7
+  icon_segment "$scale" 2 7 0 7
+  icon_segment "$scale" 2 7 2 12
+  icon_segment "$scale" 2 12 7 12
+  icon_segment "$scale" 7 12 7 14
+  icon_segment "$scale" 7 12 12 12
+  icon_segment "$scale" 12 12 12 2
+  icon_segment "$scale" 12 2 11 2
+  # Finish from the top cross: right along the outside, down, then left.
+  icon_segment "$scale" 7 0 14 0
+  icon_segment "$scale" 14 0 14 14
+  icon_segment "$scale" 14 14 9 14
+  ICON_STEPS=${#ICON_ORDER[@]}
+  for ((y=0; y<15 * scale; y++)); do
+    row=${mask[y / scale]}
+    for ((x=0; x<ICON_WIDTH; x++)); do
+      ICON_FILL[y * ICON_WIDTH + x]=${row:x * 15 / ICON_WIDTH:1}
+    done
+  done
+}
+
+# Append one cell with independently colored upper/lower pixels. This also
+# handles a green tracing tip sharing a cell with the still-dark outline.
+icon_cell() {
+  local pixel="$1" drawn="$2" solid="$3" upper=0 lower=0 step
+  if (( solid )); then
+    (( ICON_FILL[pixel] )) && upper=32
+    (( ${ICON_FILL[pixel + ICON_WIDTH]:-0} )) && lower=32
+  else
+    step=${ICON_TRACE[pixel]:-0}
+    (( step > 0 )) && upper=90
+    (( step > 0 && step <= drawn )) && upper=32
+    step=${ICON_TRACE[pixel + ICON_WIDTH]:-0}
+    (( step > 0 )) && lower=90
+    (( step > 0 && step <= drawn )) && lower=32
+  fi
+  if (( upper == 0 && lower == 0 )); then
+    ICON_FRAME+="${RESET} "
+  elif (( upper == lower )); then
+    ICON_FRAME+="${CSI}${upper};49m█"
+  elif (( lower == 0 )); then
+    ICON_FRAME+="${CSI}${upper};49m▀"
+  elif (( upper == 0 )); then
+    ICON_FRAME+="${CSI}${lower};49m▄"
+  else
+    ICON_FRAME+="${CSI}${upper};$((lower + 10))m▀"
+  fi
+}
+
+render_icon() {
+  local pm="$1" full="${2:-0}" drawn i pixel row col
+  drawn=$((pm * ICON_STEPS / 1000))
+  ICON_FRAME=""
+  if (( full || pm == 1000 )); then
+    for ((row=0; row<ICON_HEIGHT; row++)); do
+      ICON_FRAME+="${CSI}$((SETUP_TOP_ROW + row));${ICON_LEFT}H"
+      for ((col=0; col<ICON_WIDTH; col++)); do
+        icon_cell "$((row * 2 * ICON_WIDTH + col))" "$drawn" "$((pm == 1000))"
+      done
+    done
+  else
+    # Between layout changes, repaint only newly traced pixels. This keeps the
+    # animation cheap while finalize-user and the re-key work the disk.
+    for ((i=ICON_DRAWN; i<drawn; i++)); do
+      pixel=${ICON_ORDER[i]}
+      row=$((pixel / ICON_WIDTH / 2)) col=$((pixel % ICON_WIDTH))
+      ICON_FRAME+="${CSI}$((SETUP_TOP_ROW + row));$((ICON_LEFT + col))H"
+      icon_cell "$((row * 2 * ICON_WIDTH + col))" "$drawn" 0
+    done
+  fi
+  printf '%s%s' "$ICON_FRAME" "$RESET"
+  ICON_DRAWN=$drawn
+}
+
+# Monotonic clock so an NTP step during setup cannot jump the progress.
 set_now() {
   local up rest
   if read -r up rest </proc/uptime 2>/dev/null && [[ $up == [0-9]* ]]; then
@@ -338,12 +532,11 @@ REKEY_PENDING=false
 phase_band() {
   if $REKEY_PENDING; then
     # Encrypted: finalize is quick, the LUKS re-key (UKI rebuild) is the long
-    # pole — give it nearly half the bar so it keeps moving while it works.
+    # pole — give it nearly half the trace so it keeps moving while it works.
     case $1 in
       finalize) echo "80 480 40" ;;
       rekey)    echo "480 950 30" ;;
       boot)     echo "950 990 20" ;;
-      done)     echo "1000 1000 1" ;;
       *)        echo "10 80 3" ;;
     esac
   else
@@ -351,7 +544,6 @@ phase_band() {
     case $1 in
       finalize) echo "80 900 45" ;;
       boot)     echo "900 990 20" ;;
-      done)     echo "1000 1000 1" ;;
       *)        echo "10 80 3" ;;
     esac
   fi
@@ -393,44 +585,77 @@ setup_progress() {
   return 0
 }
 
-# Vertically center the setup block the way greeter_screen centers its splash,
-# so the screen the owner watches through finalization is composed rather than
-# stacked from row one — and first boot bookends the install identically.
+# Size the icon to the console and vertically center the setup block the way
+# greeter_screen centers its splash, so the screen the owner watches through
+# finalization is composed rather than stacked from row one — and first boot
+# bookends the install identically.
 measure_setup_layout() {
-  local rows
+  local rows cols scale=1
   LAST_SETUP_SIZE=$(term_size)
-  rows=${LAST_SETUP_SIZE%% *}
+  read -r rows cols <<<"$LAST_SETUP_SIZE"
   [[ $rows =~ ^[0-9]+$ ]] || rows=24
-  SETUP_TOP_ROW=$(((rows - SETUP_HEIGHT) / 2))
+  [[ $cols =~ ^[0-9]+$ ]] || cols=80
+  read -r CELL_WIDTH CELL_HEIGHT < <(term_cell_size 2>/dev/null || printf '8 16\n') || true
+  # A zero or missing cell size would divide by zero below and end setup.
+  [[ $CELL_WIDTH =~ ^[1-9][0-9]*$ && $CELL_HEIGHT =~ ^[1-9][0-9]*$ ]] || CELL_WIDTH=8 CELL_HEIGHT=16
+  (( rows >= 34 && cols >= 49 )) && scale=2
+  (( rows >= 50 && cols >= 64 )) && scale=3
+  while (( scale > 1 && 15 * ((scale * CELL_HEIGHT + CELL_WIDTH) / (2 * CELL_WIDTH)) > cols - 4 )); do
+    scale=$((scale - 1))
+  done
+  build_icon "$scale"
+  # The icon, a blank, the percentage, two blanks, the tip.
+  SETUP_TOP_ROW=$(((rows - ICON_HEIGHT - 5) / 2))
   (( SETUP_TOP_ROW < 0 )) && SETUP_TOP_ROW=0
   SETUP_TOP_ROW=$((SETUP_TOP_ROW + 1))
-  DYNAMIC_ROW=$((SETUP_TOP_ROW + LOGO_HEIGHT + 1))
+  ICON_LEFT=$(((cols - ICON_WIDTH) / 2 + 1))
+  (( ICON_LEFT < 1 )) && ICON_LEFT=1
+  SETUP_TEXT_WIDTH=$((cols - 2))
+  (( SETUP_TEXT_WIDTH > LOGO_WIDTH )) && SETUP_TEXT_WIDTH=$LOGO_WIDTH
+  return 0
 }
 
 render_setup_static() {
   measure_setup_layout
-  printf '%s%s%s%d;1H' "$HIDE_CURSOR" "$CLEAR" "$CSI" "$SETUP_TOP_ROW"
-  render_logo
-  blank_line
+  printf '%s%s' "$HIDE_CURSOR" "$CLEAR"
+  render_icon "$DISPLAY_PM" 1
 }
 
 render_setup_dynamic() {
+  local step tip
   # The VT can still resize under us — the same virtio-gpu KMS handoff the
-  # greeter watches for. left_padding recomputes every frame, but the logo is
-  # drawn once, so repaint it at the new center rather than leaving the centered
-  # block stranded against a stale geometry.
+  # greeter watches for. Rebuild the icon at the new size, keeping its progress,
+  # rather than leaving it stranded against a stale geometry.
   [[ $(term_size) == "$LAST_SETUP_SIZE" ]] || render_setup_static
-  set_now
-  setup_progress
-  printf '%s%d;1H' "$CSI" "$DYNAMIC_ROW"
-  center "Setting up your machine" "$LOGO_WIDTH"
+  # Ease phase jumps over several frames, with the percentage following the
+  # same position as the trace. The measured progress still never goes back.
+  step=$(((SETUP_POS - DISPLAY_PM + 3) / 4))
+  DISPLAY_PM=$((DISPLAY_PM + step))
+  render_icon "$DISPLAY_PM"
+
+  tip="$(truncate_for_width "Tip: $(current_tip)" "$SETUP_TEXT_WIDTH")"
+  printf '%s%d;1H' "$CSI" "$((SETUP_TOP_ROW + ICON_HEIGHT + 1))"
+  center "${GREEN}$((DISPLAY_PM / 10))%${RESET}" "$SETUP_TEXT_WIDTH"
   blank_line
-  line_at "$LOGO_WIDTH" $(((LOGO_WIDTH - 34) / 2)) ""
-  progress_bar "$SETUP_POS" 34
-  printf '\n'
+  # The install screen shows its medium verify's percent on this row; first
+  # boot has nothing to verify, so it stays blank and the tip sits where the
+  # install's did.
   blank_line
-  center "${DIM}Tip:${RESET} ${GREEN}$(current_tip)${RESET}" "$LOGO_WIDTH"
+  center "${DIM}${tip}${RESET}" "$SETUP_TEXT_WIDTH"
   printf '%s' "$CLEAR_TO_END"
+}
+
+# Only setup's successful end completes the trace. Finish it even when setup
+# ends between state reads, then draw the whole icon: the last frame before the
+# display manager takes over.
+render_setup_finish() {
+  SETUP_POS=1000
+  while (( DISPLAY_PM < 999 )); do
+    render_setup_dynamic
+    sleep 0.05
+  done
+  DISPLAY_PM=1000
+  render_setup_dynamic
 }
 
 # The first thing a new owner sees, shown once before the keyboard step:
@@ -1177,7 +1402,7 @@ cleanup_oem_state() {
 }
 
 # The provisioning work, backgrounded under the progress screen. Phase writes
-# to STATE_FILE drive the bar; all output lands in the log.
+# to STATE_FILE drive the trace; all output lands in the log.
 run_provisioning() {
   log_step "creating user $username"
   create_user
@@ -1279,9 +1504,13 @@ run_setup() {
   SETUP_PHASE_T0=$NOW
 
   render_setup_static
+  local frame=0
   while kill -0 "$worker" 2>/dev/null; do
+    # Read the state and the log at 2 Hz; animate the trace at 10 Hz.
+    (( frame % 5 == 0 )) && { set_now; setup_progress; }
     render_setup_dynamic
-    sleep 0.5
+    frame=$((frame + 1))
+    sleep 0.1
   done
 
   # The cursor comes back only on the failure path, where the retry prompt needs
@@ -1293,9 +1522,8 @@ run_setup() {
     return "$status"
   fi
 
-  # One full-bar frame so the finish doesn't cut in mid-progress.
-  echo done >"$STATE_FILE"
-  render_setup_dynamic
+  # End on the whole icon so the finish doesn't cut in mid-trace.
+  render_setup_finish
   sleep 1
 
   if [[ -f $FINALIZE_WARNING_FLAG ]]; then
@@ -1310,8 +1538,8 @@ run_setup() {
   # the moment this oneshot exits (Before=display-manager.service) and autologs
   # in on encrypted installs. No timed celebration screen and no "start" button
   # here — that send-off belongs to a direct install, not first-boot setup. The
-  # finished progress bar is the last frame; clearing it for a "Starting
-  # Omarchy..." card would only add a flash of screen before the handoff.
+  # whole icon is the last frame; clearing it for a "Starting Omarchy..." card
+  # would only add a flash of screen before the handoff.
 }
 
 # A failed first-boot setup must not strand the machine at a user-less login

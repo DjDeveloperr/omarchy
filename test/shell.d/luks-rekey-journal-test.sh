@@ -270,8 +270,10 @@ attempt() {
     exit 3
   }
   set_now() { NOW=0; }
+  setup_progress() { :; }
   render_setup_static() { :; }
   render_setup_dynamic() { :; }
+  render_setup_finish() { :; }
   SHOW_CURSOR=""
   run_setup
 }
