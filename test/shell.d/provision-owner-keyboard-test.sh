@@ -345,8 +345,8 @@ pass "off a virtual console the layout is persisted and checked without loadkeys
   pass "the icon traces exactly its own pixels at every size"
 
   # Setup can end between two state reads, far short of the end of the trace.
-  # The screen still traces the rest and ends on the whole icon at 100%, the
-  # frame the display manager takes over from.
+  # The screen still traces the rest frame by frame, not in one jump, and ends
+  # on the whole icon at 100%, the frame the display manager takes over from.
   term_size() { echo "52 160"; }
   sleep() { :; }
   render_setup_static >/dev/null
@@ -355,8 +355,10 @@ pass "off a virtual console the layout is persisted and checked without loadkeys
   render_setup_finish >"$progress/finish"
   (( DISPLAY_PM == 1000 && ICON_DRAWN == ICON_STEPS )) ||
     fail "setup ending mid-trace still draws the whole icon" "display $DISPLAY_PM, drawn $ICON_DRAWN of $ICON_STEPS"
-  [[ $(grep -ao '[0-9]*%' "$progress/finish" | tail -n1) == "100%" ]] || fail "setup ending mid-trace ends at 100%"
-  pass "setup ending mid-trace finishes the trace and ends on the whole icon at 100%"
+  mapfile -t shown < <(grep -ao '[0-9]*%' "$progress/finish" | uniq)
+  (( ${#shown[@]} > 2 )) && [[ ${shown[-1]} == "100%" ]] ||
+    fail "setup ending mid-trace traces the rest over several frames, up to 100%" "shown: ${shown[*]}"
+  pass "setup ending mid-trace traces the rest over several frames and ends on the whole icon at 100%"
 
   # The kbd fonts the screen can pick must map the block glyphs it draws (█ ▀ ▄,
   # in the logo and the icon). Terminus lacks the half blocks; the ISO patches
