@@ -582,10 +582,12 @@ render_setup_dynamic() {
 
 # Only setup's successful end completes the trace. Finish it even when setup
 # ends between state reads, then draw the whole icon: the last frame before the
-# display manager takes over.
+# display manager takes over. The ease covers even the whole trace in under 30
+# frames; the cap ends the finish however the frames advance.
 render_setup_finish() {
+  local frame
   SETUP_POS=1000
-  while (( DISPLAY_PM < 999 )); do
+  for ((frame = 0; frame < 40 && DISPLAY_PM < 999; frame++)); do
     render_setup_dynamic
     sleep 0.05
   done
