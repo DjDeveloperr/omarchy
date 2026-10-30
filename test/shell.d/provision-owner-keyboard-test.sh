@@ -318,8 +318,8 @@ pass "off a virtual console the layout is persisted and checked without loadkeys
 
 # First-boot setup's progress screen, the ISO install dashboard's: the Omarchy
 # icon traced in green as setup advances, then drawn whole. The screen runs as
-# omarchy-provision-owner defines it, on a console whose size and font cell are
-# given here instead of read from a VT.
+# omarchy-provision-owner defines it, on a console whose size is given here
+# instead of read from a VT.
 # It runs in a subshell so its stubs and globals stay out of the keyboard tests.
 (
   progress=$tmp/progress
@@ -330,59 +330,25 @@ pass "off a virtual console the layout is persisted and checked without loadkeys
   # shellcheck disable=SC1091
   source "$progress/screen.sh"
 
-  # Lengths of the runs of filled icon pixels along one pixel row.
-  fill_runs() {
-    local y=$1 x run=0 runs=()
-    for ((x = 0; x < ICON_WIDTH; x++)); do
-      if (( ICON_FILL[y * ICON_WIDTH + x] )); then
-        run=$((run + 1))
-      elif (( run )); then
-        runs+=("$run")
-        run=0
-      fi
-    done
-    (( run )) && runs+=("$run")
-    echo "${runs[*]}"
-  }
-
-  # The cells of the three fonts scale_console_font picks from (default8x16,
-  # sun12x22, latarcyrheb-sun32), at every size the screen draws the icon. The
-  # trace must paint exactly the pixels the finished icon fills, or the last
-  # frame pops in pixels the trace never reached. And every upright stroke must
-  # be as wide as the others: sun12x22's cell isn't 2:1 like the ISO's Terminus,
-  # and proportional columns drew its right edge and bridges at half width.
-  for cell in "8 16" "12 22" "16 32"; do
-    read -r CELL_WIDTH CELL_HEIGHT <<<"$cell"
-    for scale in 1 2 3; do
-      build_icon "$scale"
-      for ((pixel = 0; pixel < ICON_WIDTH * 15 * scale; pixel++)); do
-        traced=0
-        [[ -v ICON_TRACE[pixel] ]] && traced=1
-        (( traced == ICON_FILL[pixel] )) ||
-          fail "the ${CELL_WIDTH}x$CELL_HEIGHT icon at scale $scale traces exactly its own pixels" "pixel $pixel: traced $traced, filled ${ICON_FILL[pixel]}"
-      done
-      # Icon row 1 crosses only the two edges and the top bridge, row 4 the two
-      # edges and the two inner walls.
-      for row_strokes in "1 3" "4 4"; do
-        read -r row strokes <<<"$row_strokes"
-        read -ra runs <<<"$(fill_runs $((row * scale)))"
-        (( ${#runs[@]} == strokes )) ||
-          fail "the ${CELL_WIDTH}x$CELL_HEIGHT icon at scale $scale draws every upright stroke" "icon row $row strokes: ${runs[*]}"
-        for run in "${runs[@]}"; do
-          (( run == runs[0] )) ||
-            fail "the ${CELL_WIDTH}x$CELL_HEIGHT icon at scale $scale draws every upright stroke equally wide" "icon row $row strokes: ${runs[*]}"
-        done
-      done
+  # At every size the screen draws the icon, the trace must paint exactly the
+  # pixels the finished icon fills, or the last frame pops in pixels the trace
+  # never reached.
+  for scale in 1 2 3; do
+    build_icon "$scale"
+    for ((pixel = 0; pixel < ICON_WIDTH * 15 * scale; pixel++)); do
+      traced=0
+      [[ -v ICON_TRACE[pixel] ]] && traced=1
+      (( traced == ICON_FILL[pixel] )) ||
+        fail "the icon at scale $scale traces exactly its own pixels" "pixel $pixel: traced $traced, filled ${ICON_FILL[pixel]}"
     done
   done
-  pass "the icon traces exactly its own pixels, with even strokes, in every console font and size"
+  pass "the icon traces exactly its own pixels at every size"
 
   # Setup can end between two state reads, far short of the end of the trace.
   # The screen still traces the rest and ends on the whole icon at 100%, the
   # frame the display manager takes over from.
   term_size() { echo "52 160"; }
   term_cols() { echo 160; }
-  term_cell_size() { echo "16 32"; }
   sleep() { :; }
   render_setup_static >/dev/null
   SETUP_POS=300

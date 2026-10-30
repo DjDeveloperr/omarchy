@@ -210,61 +210,6 @@ term_cols() {
 
 term_size() { stty size 2>/dev/null </dev/tty || printf '24 80\n'; }
 
-# Read the actual character dimensions instead of assuming an 8 x 16 font:
-# scale_console_font may have picked a 12 x 22 or 16 x 32 one. Linux VTs expose
-# the font through KDFONTOP; desktop terminals may expose pixels in their window
-# size or answer the standard cell-size query.
-term_cell_size() {
-  python3 - /dev/tty <<'PY'
-import fcntl
-import os
-import re
-import select
-import struct
-import sys
-import termios
-import time
-import tty
-
-with open(sys.argv[1], "r+b", buffering=0) as terminal:
-    fd = terminal.fileno()
-    rows, cols, width, height = struct.unpack(
-        "HHHH", fcntl.ioctl(fd, termios.TIOCGWINSZ, bytes(8)))
-    if rows and cols and width and height:
-        print(round(width / cols), round(height / rows))
-        sys.exit()
-    try:
-        font = bytearray(struct.pack("@5IP", 1, 0, 0, 0, 0, 0))
-        fcntl.ioctl(fd, 0x4B72, font)  # KDFONTOP / KD_FONT_OP_GET, no glyph data
-        _, _, width, height, _ = struct.unpack_from("@5I", font)
-        if width and height:
-            print(width, height)
-            sys.exit()
-    except OSError:
-        pass
-
-    settings = termios.tcgetattr(fd)
-    try:
-        tty.setcbreak(fd, termios.TCSANOW)
-        os.write(fd, b"\x1b[16t")
-        response = b""
-        deadline = time.monotonic() + 0.15
-        while select.select([fd], [], [], max(0, deadline - time.monotonic()))[0]:
-            response += os.read(fd, 64)
-            match = re.search(rb"\x1b\[6;(\d+);(\d+)t", response)
-            if match:
-                height, width = map(int, match.groups())
-                if width and height:
-                    print(width, height)
-                    sys.exit()
-            if time.monotonic() >= deadline:
-                break
-    finally:
-        termios.tcsetattr(fd, termios.TCSANOW, settings)
-    print(8, 16)  # Conventional console font when dimensions aren't available.
-PY
-}
-
 # A fingerprint of the console geometry: the VT size plus the framebuffer's
 # identity and pixel size. On a fresh first boot the VT can come up in a
 # transitional ~80x25 mode and only widen to the real resolution a second or
@@ -333,16 +278,17 @@ truncate_for_width() {
   fi
 }
 
-# The icon uses half-block glyphs, scaled to the terminal's actual cell aspect
-# ratio so its square silhouette stays square. No graphics protocol is needed.
-# Coordinates follow the 15 x 15 grid of Omarchy's icon.svg. Each segment
+# The icon uses half-block glyphs, so a pixel is one cell wide and half a cell
+# tall, and no graphics protocol is needed. Coordinates follow the 15 x 15 grid
+# of Omarchy's icon.svg, each square scale pixels a side, so the icon is
+# 15 * scale cells wide and every stroke is as wide as the next on any console
+# font. That is square on default8x16 and latarcyrheb-sun32, whose half cells
+# are as tall as they are wide, and 9% wider than tall on sun12x22. Each segment
 # paints the full stroke width, starting at the bottom middle of the outer ring.
 # The ISO adds ▀ and ▄ to its Terminus console font; the three kbd fonts
 # scale_console_font picks from already map them and █, as the logo needs too.
 ICON_WIDTH=30
 ICON_HEIGHT=15
-CELL_WIDTH=8
-CELL_HEIGHT=16
 ICON_LEFT=1
 ICON_STEPS=0
 ICON_DRAWN=0
@@ -407,11 +353,7 @@ build_icon() {
     100000010000001
     111111110111111
   )
-  # Whole cells per grid column, so every stroke is as wide as the next. On a
-  # 2:1 font that is exactly square, as on the ISO's Terminus; on sun12x22 it
-  # is 9% wider than tall, where proportional columns would draw the right edge
-  # and the bridges at half width.
-  ICON_WIDTH=$((15 * ((scale * CELL_HEIGHT + CELL_WIDTH) / (2 * CELL_WIDTH))))
+  ICON_WIDTH=$((15 * scale))
   ICON_HEIGHT=$(((15 * scale + 1) / 2))
   ICON_ORDER=() ICON_TRACE=() ICON_FILL=()
   ICON_DRAWN=0
@@ -595,14 +537,10 @@ measure_setup_layout() {
   read -r rows cols <<<"$LAST_SETUP_SIZE"
   [[ $rows =~ ^[0-9]+$ ]] || rows=24
   [[ $cols =~ ^[0-9]+$ ]] || cols=80
-  read -r CELL_WIDTH CELL_HEIGHT < <(term_cell_size 2>/dev/null || printf '8 16\n') || true
-  # A zero or missing cell size would divide by zero below and end setup.
-  [[ $CELL_WIDTH =~ ^[1-9][0-9]*$ && $CELL_HEIGHT =~ ^[1-9][0-9]*$ ]] || CELL_WIDTH=8 CELL_HEIGHT=16
+  # The ISO's sizes. At 15 * scale cells the icon clears the ISO's four-column
+  # margin at both thresholds, so no width check is needed.
   (( rows >= 34 && cols >= 49 )) && scale=2
   (( rows >= 50 && cols >= 64 )) && scale=3
-  while (( scale > 1 && 15 * ((scale * CELL_HEIGHT + CELL_WIDTH) / (2 * CELL_WIDTH)) > cols - 4 )); do
-    scale=$((scale - 1))
-  done
   build_icon "$scale"
   # The icon, a blank, the percentage, two blanks, the tip.
   SETUP_TOP_ROW=$(((rows - ICON_HEIGHT - 5) / 2))
