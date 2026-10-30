@@ -253,29 +253,15 @@ left_padding() {
   printf '%*s' "$pad" ''
 }
 
-visible_len() {
-  local text="$1"
-  text="$(printf '%b' "$text" | sed -E $'s/\x1b\\[[0-9;?]*[A-Za-z]//g')"
-  printf '%s' "${#text}"
-}
-
 blank_line() { printf '\r%s\n' "$CLEAR_LINE"; }
 
-center() {
-  local text="$1" width="${2:-$LOGO_WIDTH}" len inner_pad
-  len="$(visible_len "$text")"
-  inner_pad=$(((width - len) / 2))
-  (( inner_pad < 0 )) && inner_pad=0
-  printf '\r%s%s%*s%b%s\n' "$CLEAR_LINE" "$(left_padding "$width")" "$inner_pad" '' "$text" "$RESET"
-}
-
-truncate_for_width() {
-  local text="$1" width="$2"
-  if (( ${#text} > width )); then
-    printf '%s…' "${text:0:$((width - 1))}"
-  else
-    printf '%s' "$text"
-  fi
+# One line of plain text, centered in the setup block, in a colour. Its length
+# is its width and measure_setup_layout worked out the block's padding, so
+# drawing a frame forks nothing.
+setup_line() {
+  local text="$1" color="$2"
+  printf '\r%s%*s%s%s%s\n' "$CLEAR_LINE" "$((SETUP_TEXT_LEFT + (SETUP_TEXT_WIDTH - ${#text}) / 2))" '' \
+    "$color" "$text" "$RESET"
 }
 
 # The icon uses half-block glyphs, so a pixel is one cell wide and half a cell
@@ -454,11 +440,6 @@ set_now() {
   return 0
 }
 
-# One tip per 8 seconds, elapsed-time driven like the install dashboard.
-current_tip() {
-  printf '%s' "${tips[$(((NOW - SETUP_T0) / 8 % ${#tips[@]}))]}"
-}
-
 SETUP_POS=10
 SETUP_PHASE=""
 SETUP_PHASE_T0=0
@@ -535,7 +516,8 @@ setup_progress() {
 # Size the icon to the console and vertically center the setup block the way
 # greeter_screen centers its splash, so the screen the owner watches through
 # finalization is composed rather than stacked from row one — and first boot
-# bookends the install identically.
+# bookends the install identically. The text's padding is worked out here too,
+# so the frames between layouts fork nothing.
 measure_setup_layout() {
   local rows cols scale=1
   LAST_SETUP_SIZE=$(term_size)
@@ -555,6 +537,7 @@ measure_setup_layout() {
   (( ICON_LEFT < 1 )) && ICON_LEFT=1
   SETUP_TEXT_WIDTH=$((cols - 2))
   (( SETUP_TEXT_WIDTH > LOGO_WIDTH )) && SETUP_TEXT_WIDTH=$LOGO_WIDTH
+  SETUP_TEXT_LEFT=$(((cols - SETUP_TEXT_WIDTH) / 2))
   return 0
 }
 
@@ -564,27 +547,36 @@ render_setup_static() {
   render_icon "$DISPLAY_PM" 1
 }
 
+# Read the state and the log. The VT can also still resize under us — the same
+# virtio-gpu KMS handoff the greeter watches for — so rebuild the icon at a new
+# size, keeping its progress, rather than leave it stranded against a stale
+# geometry. Never call in a command substitution: the position, the phase timer
+# and the layout must survive between frames.
+update_setup_progress() {
+  set_now
+  setup_progress
+  [[ $(term_size) == "$LAST_SETUP_SIZE" ]] || render_setup_static
+}
+
 render_setup_dynamic() {
   local step tip
-  # The VT can still resize under us — the same virtio-gpu KMS handoff the
-  # greeter watches for. Rebuild the icon at the new size, keeping its progress,
-  # rather than leaving it stranded against a stale geometry.
-  [[ $(term_size) == "$LAST_SETUP_SIZE" ]] || render_setup_static
   # Ease phase jumps over several frames, with the percentage following the
   # same position as the trace. The measured progress still never goes back.
   step=$(((SETUP_POS - DISPLAY_PM + 3) / 4))
   DISPLAY_PM=$((DISPLAY_PM + step))
   render_icon "$DISPLAY_PM"
 
-  tip="$(truncate_for_width "Tip: $(current_tip)" "$SETUP_TEXT_WIDTH")"
+  # One tip per 8 seconds, elapsed-time driven like the install dashboard.
+  tip="Tip: ${tips[(NOW - SETUP_T0) / 8 % ${#tips[@]}]}"
+  (( ${#tip} <= SETUP_TEXT_WIDTH )) || tip="${tip:0:SETUP_TEXT_WIDTH - 1}…"
   printf '%s%d;1H' "$CSI" "$((SETUP_TOP_ROW + ICON_HEIGHT + 1))"
-  center "${GREEN}$((DISPLAY_PM / 10))%${RESET}" "$SETUP_TEXT_WIDTH"
+  setup_line "$((DISPLAY_PM / 10))%" "$GREEN"
   blank_line
   # The install screen shows its medium verify's percent on this row; first
   # boot has nothing to verify, so it stays blank and the tip sits where the
   # install's did.
   blank_line
-  center "${DIM}${tip}${RESET}" "$SETUP_TEXT_WIDTH"
+  setup_line "$tip" "$DIM"
   printf '%s' "$CLEAR_TO_END"
 }
 
@@ -1449,8 +1441,9 @@ run_setup() {
   render_setup_static
   local frame=0
   while kill -0 "$worker" 2>/dev/null; do
-    # Read the state and the log at 2 Hz; animate the trace at 10 Hz.
-    (( frame % 5 == 0 )) && { set_now; setup_progress; }
+    # Read the state, the log and the console size at 2 Hz; animate the trace
+    # at 10 Hz.
+    (( frame % 5 == 0 )) && update_setup_progress
     render_setup_dynamic
     frame=$((frame + 1))
     sleep 0.1

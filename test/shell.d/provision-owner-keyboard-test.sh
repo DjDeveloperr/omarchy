@@ -348,7 +348,6 @@ pass "off a virtual console the layout is persisted and checked without loadkeys
   # The screen still traces the rest and ends on the whole icon at 100%, the
   # frame the display manager takes over from.
   term_size() { echo "52 160"; }
-  term_cols() { echo 160; }
   sleep() { :; }
   render_setup_static >/dev/null
   SETUP_POS=300
