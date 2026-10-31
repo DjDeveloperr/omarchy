@@ -335,4 +335,18 @@ pass "off a virtual console the layout is persisted and checked without loadkeys
       fail "the icon at scale $scale never asks for a bright background" "$(grep -aoE $'\033\\[[0-9]+;10[0-7]m.' "$tmp/trace" | sort -u | cat -v)"
   done
   pass "the traced icon never asks the VT for a bright background"
+
+  # Setup draws ten frames a second while it works the disk, so a frame must not
+  # start processes: only every fifth reads the console size, and none runs sed.
+  stty() { echo stty >>"$tmp/started"; echo "40 120"; }
+  sed() { echo sed >>"$tmp/started"; command sed "$@"; }
+  progress_icon_cell_size() { echo "8 16"; }
+  progress_icon_layout /dev/null 78
+  : >"$tmp/started"
+  for ((frame = 1; frame <= 10; frame++)); do
+    progress_icon_frame "$((frame * 50))" "Setting up your machine" "Tip: one of the tips"
+  done >/dev/null
+  ! grep -q '^sed$' "$tmp/started" && (( $(grep -c '^stty$' "$tmp/started") <= 2 )) ||
+    fail "ten frames read the console size at most twice and run no sed" "$(sort "$tmp/started" | uniq -c)"
+  pass "a frame starts no process except the console size check on every fifth"
 )

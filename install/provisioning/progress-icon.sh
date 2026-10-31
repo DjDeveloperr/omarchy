@@ -18,6 +18,7 @@
 
 PROGRESS_ICON_CSI=$'\033['
 PROGRESS_ICON_RESET="${PROGRESS_ICON_CSI}0m"
+PROGRESS_ICON_ESCAPE=$'\033''\[[0-9;?]*[A-Za-z]'
 
 # The icon uses half-block glyphs, scaled to the terminal's actual cell aspect
 # ratio so its square silhouette stays square. No graphics protocol is needed.
@@ -34,6 +35,8 @@ ICON_DRAWN=0
 ICON_FRAME=""
 ICON_TTY=/dev/tty
 ICON_SIZE=""
+ICON_COLS=80
+ICON_FRAMES=0
 ICON_TEXT_WIDTH=78
 ICON_TEXT_LIMIT=78
 ICON_DISPLAY_PM=0
@@ -223,24 +226,26 @@ progress_icon_render() {
   ICON_DRAWN=$drawn
 }
 
-# Center one line of text, escapes included, across the console.
+# Center one line of text, escapes included, across the console the layout
+# measured. The text is measured in bash, so drawing a line starts no process.
 progress_icon_line() {
-  local text="$1" plain cols pad
-  plain="$(printf '%b' "$text" | sed -E $'s/\x1b\\[[0-9;?]*[A-Za-z]//g')"
-  cols="$(progress_icon_term_size)"
-  cols="${cols#* }"
-  [[ $cols =~ ^[0-9]+$ ]] || cols=80
-  pad=$(( (cols - ${#plain}) / 2 ))
+  local text="$1" plain pad
+  printf -v plain '%b' "$text"
+  while [[ $plain =~ $PROGRESS_ICON_ESCAPE ]]; do
+    plain=${plain/"${BASH_REMATCH[0]}"/}
+  done
+  pad=$(( (ICON_COLS - ${#plain}) / 2 ))
   (( pad < 0 )) && pad=0
   printf '\r%s2K%*s%b%s\n' "$PROGRESS_ICON_CSI" "$pad" '' "$text" "$PROGRESS_ICON_RESET"
 }
 
+# Set the variable <name> to <text>, cut to the text width.
 progress_icon_truncate() {
-  local text="$1" width="$ICON_TEXT_WIDTH"
+  local text="$2" width="$ICON_TEXT_WIDTH"
   if (( ${#text} > width )); then
-    printf '%s…' "${text:0:$((width - 1))}"
+    printf -v "$1" '%s…' "${text:0:$((width - 1))}"
   else
-    printf '%s' "$text"
+    printf -v "$1" '%s' "$text"
   fi
 }
 
@@ -256,6 +261,7 @@ progress_icon_layout() {
   read -r rows cols <<<"$ICON_SIZE"
   [[ $rows =~ ^[0-9]+$ ]] || rows=24
   [[ $cols =~ ^[0-9]+$ ]] || cols=80
+  ICON_COLS=$cols
   read -r CELL_WIDTH CELL_HEIGHT < <(progress_icon_cell_size "$ICON_TTY" 2>/dev/null || printf '8 16\n')
   (( rows >= 34 && cols >= 49 )) && scale=2
   (( rows >= 50 && cols >= 64 )) && scale=3
@@ -282,16 +288,19 @@ progress_icon_static() {
 # Draw one frame toward <pm>, which must never go back. Phase jumps ease over
 # several frames, with the percentage following the same position as the trace.
 # The status row is blank when no status is given, so the layout never changes
-# height.
+# height. Callers draw ten frames a second while setup works the disk, so a
+# frame starts no process except the console size check on every fifth.
 progress_icon_frame() {
-  local pm="${1:-0}" status="${2:-}" tip="${3:-}" step
+  local pm="${1:-0}" status="${2:-}" tip="${3:-}" step shown_status="" shown_tip
   [[ $pm =~ ^[0-9]+$ ]] || pm=$ICON_TARGET_PM
   (( pm > 1000 )) && pm=1000
   (( pm < ICON_TARGET_PM )) && pm=$ICON_TARGET_PM
   ICON_TARGET_PM=$pm
   # The framebuffer can settle late in VMs. Rebuild at the new size, preserving
   # progress, instead of leaving the drawing at the old screen coordinates.
-  [[ "$(progress_icon_term_size)" == "$ICON_SIZE" ]] || progress_icon_static
+  if (( ICON_FRAMES++ % 5 == 0 )); then
+    [[ "$(progress_icon_term_size)" == "$ICON_SIZE" ]] || progress_icon_static
+  fi
   step=$(( (ICON_TARGET_PM - ICON_DISPLAY_PM + 3) / 4 ))
   ICON_DISPLAY_PM=$((ICON_DISPLAY_PM + step))
   progress_icon_render "$ICON_DISPLAY_PM"
@@ -300,11 +309,13 @@ progress_icon_frame() {
   progress_icon_line "${PROGRESS_ICON_CSI}32m$((ICON_DISPLAY_PM / 10))%"
   progress_icon_line ""
   if [[ -n $status ]]; then
-    progress_icon_line "${PROGRESS_ICON_CSI}2m$(progress_icon_truncate "$status")"
+    progress_icon_truncate shown_status "$status"
+    progress_icon_line "${PROGRESS_ICON_CSI}2m$shown_status"
   else
     progress_icon_line ""
   fi
-  progress_icon_line "${PROGRESS_ICON_CSI}2m$(progress_icon_truncate "$tip")"
+  progress_icon_truncate shown_tip "$tip"
+  progress_icon_line "${PROGRESS_ICON_CSI}2m$shown_tip"
   printf '%sJ' "$PROGRESS_ICON_CSI"
 }
 
