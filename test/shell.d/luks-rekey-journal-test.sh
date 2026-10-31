@@ -270,7 +270,6 @@ attempt() {
     exit 3
   }
   set_now() { NOW=0; }
-  update_setup_progress() { :; }
   render_setup_static() { :; }
   render_setup_dynamic() { :; }
   render_setup_finish() { :; }
