@@ -25,6 +25,7 @@ PROGRESS_ICON_ESCAPE=$'\033''\[[0-9;?]*[A-Za-z]'
 # Coordinates follow the 15 x 15 grid of Omarchy's icon.svg. Each segment
 # paints the full stroke width, starting at the bottom middle of the outer ring.
 ICON_WIDTH=30
+ICON_COLUMN=2
 ICON_HEIGHT=15
 ICON_TOP=1
 ICON_LEFT=1
@@ -109,6 +110,15 @@ progress_icon_segment() {
   fi
 }
 
+# The screen columns each of the icon's 15 grid columns takes at <scale>. Every
+# grid column gets the same whole number, the nearest to square in this font,
+# so a font that isn't 2:1, like sun12x22, neither drops a column nor draws some
+# strokes narrower than others.
+progress_icon_column() {
+  ICON_COLUMN=$(( ($1 * CELL_HEIGHT + CELL_WIDTH) / (2 * CELL_WIDTH) ))
+  (( ICON_COLUMN > 0 )) || ICON_COLUMN=1
+}
+
 progress_icon_pixel() {
   local pixel="$1"
   if [[ ! -v ICON_TRACE[pixel] ]]; then
@@ -136,7 +146,8 @@ progress_icon_build() {
     100000010000001
     111111110111111
   )
-  ICON_WIDTH=$(( (15 * scale * CELL_HEIGHT + CELL_WIDTH) / (2 * CELL_WIDTH) ))
+  progress_icon_column "$scale"
+  ICON_WIDTH=$((15 * ICON_COLUMN))
   ICON_HEIGHT=$(((15 * scale + 1) / 2))
   ICON_ORDER=() ICON_TRACE=() ICON_FILL=()
   ICON_DRAWN=0
@@ -265,8 +276,10 @@ progress_icon_layout() {
   read -r CELL_WIDTH CELL_HEIGHT < <(progress_icon_cell_size "$ICON_TTY" 2>/dev/null || printf '8 16\n')
   (( rows >= 34 && cols >= 49 )) && scale=2
   (( rows >= 50 && cols >= 64 )) && scale=3
-  while (( scale > 1 && (15 * scale * CELL_HEIGHT + CELL_WIDTH) / (2 * CELL_WIDTH) > cols - 4 )); do
+  progress_icon_column "$scale"
+  while (( scale > 1 && 15 * ICON_COLUMN > cols - 4 )); do
     scale=$((scale - 1))
+    progress_icon_column "$scale"
   done
   progress_icon_build "$scale"
   top=$(( (rows - ICON_HEIGHT - 5) / 2 ))
