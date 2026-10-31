@@ -188,8 +188,13 @@ progress_icon_cell() {
     ICON_FRAME+="${PROGRESS_ICON_CSI}${upper};49m▀"
   elif (( upper == 0 )); then
     ICON_FRAME+="${PROGRESS_ICON_CSI}${lower};49m▄"
-  else
+  elif (( upper >= 90 )); then
     ICON_FRAME+="${PROGRESS_ICON_CSI}${upper};$((lower + 10))m▀"
+  else
+    # The VT reads bright backgrounds (100-107) as normal ones (40-47), so the
+    # grey half under a green tip would vanish. The bright half is always the
+    # foreground: green over grey is grey ▄ on green.
+    ICON_FRAME+="${PROGRESS_ICON_CSI}${lower};$((upper + 10))m▄"
   fi
 }
 

@@ -315,3 +315,24 @@ form || fail "off a console the layout is only persisted" "$(cat "$tmp/screen" "
 ! grep -q '^loadkeys' "$tmp/calls" || fail "loadkeys runs only on a virtual console" "$(cat "$tmp/calls")"
 assert_layout dk "off a console"
 pass "off a virtual console the layout is persisted and checked without loadkeys"
+
+# First-boot setup's progress screen, which the ISO install dashboard draws too:
+# install/provisioning/progress-icon.sh. It runs in a subshell so its globals and
+# stubs stay out of the keyboard tests.
+(
+  # shellcheck disable=SC1091
+  source "$ROOT/install/provisioning/progress-icon.sh"
+
+  # The Linux VT draws a bright background (SGR 100-107) as the normal one
+  # (40-47), so a frame must never ask for one: the grey half of a cell under
+  # the green tip would vanish. Trace every step at every size the screen draws.
+  for scale in 1 2 3; do
+    progress_icon_build "$scale"
+    for ((pm = 1; pm <= 1000; pm++)); do
+      progress_icon_render "$pm"
+    done >"$tmp/trace"
+    ! grep -qaE $'\033\\[[0-9]+;10[0-7]m' "$tmp/trace" ||
+      fail "the icon at scale $scale never asks for a bright background" "$(grep -aoE $'\033\\[[0-9]+;10[0-7]m.' "$tmp/trace" | sort -u | cat -v)"
+  done
+  pass "the traced icon never asks the VT for a bright background"
+)
